@@ -11,11 +11,12 @@ export default {
         DoH = match[1];
       }
     }
-    DoH路径 = env.PATH || env.TOKEN || DoH路径;//DoH路径也单独设置 变量PATH
-    if (DoH路径.includes("/")) DoH路径 = DoH路径.split("/")[1];
+
     const url = new URL(request.url);
     const path = url.pathname;
     const hostname = url.hostname;
+    
+    const colo = request.cf?.colo || '未知';
 
     // 处理 OPTIONS 预检请求
     if (request.method === 'OPTIONS') {
@@ -34,25 +35,55 @@ export default {
       return await DOHRequest(request);
     }
 
+
+    
+    // 文件下载路由 - 处理 /{size}KB, /{size}MB, /{size}GB 这样的请求
+    const sizeMatch = path.match(/^\/(\d+)(KB|MB|GB)$/i);
+    if (sizeMatch) {
+      const sizeNum = parseInt(sizeMatch[1]);
+      const unit = sizeMatch[2].toUpperCase();
+      
+      let sizeBytes;
+      let displaySize;
+      
+      switch (unit) {
+        case 'KB':
+          sizeBytes = sizeNum * 1000;
+          displaySize = `${sizeNum}KB`;
+          break;
+        case 'MB':
+          sizeBytes = sizeNum * 1000000;
+          displaySize = `${sizeNum}MB`;
+          break;
+        case 'GB':
+          sizeBytes = sizeNum * 1000000000;
+          displaySize = `${sizeNum}GB`;
+          break;
+      }
+      
+      const targetUrl = `https://speed.cloudflare.com/__down?bytes=${sizeBytes}`;
+      const headers = new Headers(request.headers);
+      headers.set('referer', 'https://speed.cloudflare.com/');
+      
+      const response = await fetch(new Request(targetUrl, {
+        method: request.method === 'HEAD' ? 'GET' : request.method,
+        headers: headers,
+        body: request.body
+      }));
+      
+      const newHeaders = new Headers(response.headers);
+      
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders
+      });
+    }
+
+
+
     // 添加IP地理位置信息查询代理
     if (path === '/ip-info') {
-      if (env.TOKEN) {
-        const token = url.searchParams.get('token');
-        if (token != env.TOKEN) {
-          return new Response(JSON.stringify({ 
-            status: "error",
-            message: "Token不正确",
-            code: "AUTH_FAILED",
-            timestamp: new Date().toISOString()
-          }, null, 4), {
-            status: 403,
-            headers: {
-              "content-type": "application/json; charset=UTF-8",
-              'Access-Control-Allow-Origin': '*'
-            }
-          });
-        }
-      }
 
       const ip = url.searchParams.get('ip') || request.headers.get('CF-Connecting-IP');
       if (!ip) {
@@ -231,16 +262,7 @@ export default {
       }
     }
 
-    if (env.URL302) return Response.redirect(env.URL302, 302);
-    else if (env.URL) {
-      if (env.URL.toString().toLowerCase() == 'nginx') {
-        return new Response(await nginx(), {
-          headers: {
-            'Content-Type': 'text/html; charset=UTF-8',
-          },
-        });
-      } else return await 代理URL(env.URL, url);
-    } else return await HTML();
+    return await HTML();
   }
 }
 
@@ -509,11 +531,9 @@ async function HTML() {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ZQ-DoH</title>
+  <title>ZQ-DohSpeed</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg t='1776862807100' class='icon' viewBox='0 0 1024 1024' version='1.1' xmlns='http://www.w3.org/2000/svg' p-id='1867' width='200' height='200'><path d='M512 83.2h19.2V64H512C265.6 64 64 265.6 64 512h19.2c0-236.8 192-428.8 428.8-428.8zM944 512c0 230.4-182.4 422.4-412.8 428.8v19.2C768 950.4 960 755.2 960 512h-16z m-38.4 0c0-208-169.6-377.6-377.6-377.6S153.6 304 153.6 512c0 208 169.6 377.6 377.6 377.6 208 0 374.4-169.6 374.4-377.6zM188.8 512c0-188.8 153.6-339.2 339.2-339.2S870.4 323.2 870.4 512c0 188.8-153.6 339.2-339.2 339.2-188.8 3.2-342.4-150.4-342.4-339.2z m342.4 64c19.2 19.2 44.8 28.8 70.4 28.8h19.2c60.8 0 108.8-48 108.8-108.8v-70.4c0-28.8-12.8-54.4-32-76.8s-48-32-76.8-32h-19.2c-25.6 0-51.2 9.6-70.4 28.8v-32h-35.2v393.6h35.2V576z m0-153.6c0-38.4 32-70.4 70.4-70.4h19.2c38.4 0 70.4 32 70.4 70.4v70.4c0 38.4-32 70.4-70.4 70.4h-19.2c-38.4 0-70.4-32-70.4-70.4v-70.4z m-144 288h35.2V313.6h-35.2v396.8z' fill='' p-id='1868'></path></svg>">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-  <link rel="icon"
-    href="https://cf-assets.www.cloudflare.com/dzlvafdwdttg/6TaQ8Q7BDmdAFRoHpDCb82/8d9bc52a2ac5af100de3a9adcf99ffaa/security-shield-protection-2.svg"
-    type="image/x-icon">
   <style>
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -721,6 +741,9 @@ async function HTML() {
       padding: 15px;
       border: 1px solid rgba(253, 101, 60, 0.2);
       border-top: none;
+      overflow-x: auto;
+      word-wrap: break-word;
+      word-break: break-word;
     }
 
     .ip-record {
@@ -729,6 +752,10 @@ async function HTML() {
       border-radius: 4px;
       background-color: rgba(255, 255, 255, 0.9);
       border: 1px solid rgba(253, 101, 60, 0.15);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      align-items: center;
     }
 
     .ip-record:hover {
@@ -748,6 +775,18 @@ async function HTML() {
 
     .ip-address:hover {
       color: rgb(253, 101, 60);
+    }
+
+    .ip-info-details {
+      word-wrap: break-word;
+      word-break: break-word;
+      overflow-wrap: break-word;
+    }
+
+    .ip-info-details div {
+      margin: 3px 0;
+      word-wrap: break-word;
+      word-break: break-word;
     }
 
     .ip-address:after {
@@ -896,12 +935,95 @@ async function HTML() {
       .github-corner .octo-arm {
         animation: octocat-wave 560ms ease-in-out;
       }
+
+      /* 手机端优化 */
+      .tab-content {
+        padding: 10px;
+        overflow-x: auto;
+      }
+
+      .ip-record {
+        padding: 8px 10px;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+
+      .ip-address {
+        min-width: auto;
+        max-width: 100%;
+        word-break: break-all;
+        overflow-wrap: break-word;
+      }
+
+      .geo-info {
+        margin: 5px 0;
+        font-size: 0.8em;
+        text-align: left;
+        flex-grow: 0;
+        width: 100%;
+      }
+
+      .ttl-info {
+        font-size: 0.8em;
+      }
+
+      .nav-tabs {
+        flex-wrap: wrap;
+      }
+
+      .nav-tabs .nav-link {
+        font-size: 0.85em;
+        padding: 8px 10px;
+      }
+
+      /* 防止文字溢出 */
+      .tab-pane {
+        overflow-x: auto;
+        word-wrap: break-word;
+        word-break: break-word;
+      }
+
+      pre, .pre-scrollable {
+        font-size: 0.75em;
+        overflow-x: auto;
+        max-width: 100%;
+        word-wrap: break-word;
+        white-space: pre-wrap;
+      }
+
+      .badge {
+        font-size: 0.7em;
+        padding: 3px 6px;
+      }
+
+      /* 网速显示优化 */
+      .display-4 {
+        font-size: 2rem;
+      }
+
+      h3 {
+        font-size: 1rem;
+      }
+
+      /* 表格优化 */
+      table {
+        font-size: 0.85em;
+      }
+
+      td {
+        padding: 5px;
+        word-break: break-all;
+      }
+
+      td:first-child {
+        width: 35%;
+      }
     }
   </style>
 </head>
 
 <body>
-  <a href="https://github.com/bayueqi/ZQ-DoH" target="_blank" class="github-corner" aria-label="View source on Github">
+  <a href="https://github.com/bayueqi/ZQ-DohSpeed" target="_blank" class="github-corner" aria-label="View source on Github">
     <svg viewBox="0 0 250 250" aria-hidden="true">
       <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path>
       <path
@@ -913,7 +1035,7 @@ async function HTML() {
     </svg>
   </a>
   <div class="container">
-    <h1 class="text-center mb-4">ZQ-DoH</h1>
+    <h1 class="text-center mb-4">ZQ-DohSpeed</h1>
     <div class="card">
       <div class="card-header">DNS 查询设置</div>
       <div class="card-body">
@@ -987,6 +1109,10 @@ async function HTML() {
               <button class="nav-link" id="raw-tab" data-bs-toggle="tab" data-bs-target="#raw" type="button"
                 role="tab">原始数据</button>
             </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" id="ipinfo-tab" data-bs-toggle="tab" data-bs-target="#ipinfo" type="button"
+                role="tab">IP 信息</button>
+            </li>
           </ul>
           <div class="tab-content" id="resultTabContent">
             <div class="tab-pane fade show active" id="ipv4" role="tabpanel" aria-labelledby="ipv4-tab">
@@ -1004,6 +1130,10 @@ async function HTML() {
             <div class="tab-pane fade" id="raw" role="tabpanel" aria-labelledby="raw-tab">
               <pre id="result">等待查询...</pre>
             </div>
+            <div class="tab-pane fade" id="ipinfo" role="tabpanel" aria-labelledby="ipinfo-tab">
+              <div class="result-summary" id="ipinfoSummary"></div>
+              <div id="ipinfoRecords"></div>
+            </div>
           </div>
         </div>
 
@@ -1014,10 +1144,27 @@ async function HTML() {
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-header">网络测速</div>
+      <div class="card-body">
+        <iframe src="https://test.ustc.edu.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px;"></iframe>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">我的IP信息</div>
+      <div class="card-body">
+        <div id="myIpInfo">
+          <div class="text-center text-muted" id="myIpLoading">加载中...</div>
+          <div id="myIpContent" style="display: none;"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="beian-info">
-      <p><strong>ZQ-DoH：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span
+      <p><strong>ZQ-DohSpeed：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span
               id="currentDomain">...</span>/${DoH路径}</span></strong><br>基于 Cloudflare Workers 上游 ${DoH} 的 DoH 
-        解析服务</p>
+        解析与测速服务</p>
     </div>
   </div>
 
@@ -1111,7 +1258,7 @@ async function HTML() {
     async function queryIpGeoInfo(ip) {
       try {
         // 改为使用我们自己的代理接口
-        const response = await fetch(\`./ip-info?ip=\${ip}&token=${DoH路径}\`);
+        const response = await fetch(\`./ip-info?ip=\${ip}\`);
             if (!response.ok) {
               throw new Error(\`HTTP 错误: \${response.status}\`);
             }
@@ -1138,7 +1285,7 @@ async function HTML() {
         }
         
         // 显示记录
-        function displayRecords(data) {
+        function displayRecords(data, inputDomain) {
           document.getElementById('resultContainer').style.display = 'block';
           document.getElementById('errorContainer').style.display = 'none';
           document.getElementById('result').textContent = JSON.stringify(data, null, 2);
@@ -1440,6 +1587,90 @@ async function HTML() {
             });
           }
           
+          // IP 信息 - 收集所有 IP 记录并显示详细信息
+          const allIps = [];
+          ipv4Records.forEach(r => {
+            if (r.type === 1) allIps.push(r.data);
+          });
+          ipv6Records.forEach(r => {
+            if (r.type === 28) allIps.push(r.data);
+          });
+          
+          // 检查输入的是不是IP地址，如果是就直接加进去
+          if (inputDomain) {
+            const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+            const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:){1,7}:|^(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){1,2}$|^(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){1,3}$|^(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){1,4}$|^(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){1,5}$|^[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){1,6}$|^:(?::[0-9a-fA-F]{1,4}){1,7}$/;
+            
+            if (ipv4Regex.test(inputDomain) || ipv6Regex.test(inputDomain)) {
+              if (!allIps.includes(inputDomain)) {
+                allIps.push(inputDomain);
+              }
+            }
+          }
+          
+          const ipinfoContainer = document.getElementById('ipinfoRecords');
+          ipinfoContainer.innerHTML = '';
+          
+          if (allIps.length === 0) {
+            document.getElementById('ipinfoSummary').innerHTML = \`<strong>未找到 IP 记录</strong>\`;
+          } else {
+            document.getElementById('ipinfoSummary').innerHTML = \`<strong>找到 \${allIps.length} 个 IP 地址</strong>\`;
+            
+            allIps.forEach(ip => {
+              const recordDiv = document.createElement('div');
+              recordDiv.className = 'ip-record';
+              
+              recordDiv.innerHTML = \`
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <span class="ip-address" data-copy="\${ip}">\${ip}</span>
+                  <span class="geo-info geo-loading">正在获取信息...</span>
+                </div>
+                <div class="ip-info-details ps-3 small" style="display: none;"></div>
+              \`;
+              
+              ipinfoContainer.appendChild(recordDiv);
+              
+              // 添加点击事件
+              const copyElem = recordDiv.querySelector('.ip-address');
+              copyElem.addEventListener('click', function() {
+                handleCopyClick(this, this.getAttribute('data-copy'));
+              });
+              
+              // 查询 IP 信息
+              queryIpGeoInfo(ip).then(geoData => {
+                const geoInfoSpan = recordDiv.querySelector('.geo-info');
+                const detailsDiv = recordDiv.querySelector('.ip-info-details');
+                
+                geoInfoSpan.classList.remove('geo-loading');
+                
+                if (geoData && geoData.status === 'success') {
+                  geoInfoSpan.textContent = geoData.country || '未知国家';
+                  
+                  let detailsHtml = '';
+                  if (geoData.continent) detailsHtml += \`<div><strong>大洲:</strong> \${geoData.continent}</div>\`;
+                  if (geoData.country) detailsHtml += \`<div><strong>国家:</strong> \${geoData.country} \${geoData.countryCode ? '(' + geoData.countryCode + ')' : ''}</div>\`;
+                  if (geoData.region) detailsHtml += \`<div><strong>地区:</strong> \${geoData.region}</div>\`;
+                  if (geoData.city) detailsHtml += \`<div><strong>城市:</strong> \${geoData.city}</div>\`;
+                  if (geoData.lat && geoData.lon) detailsHtml += \`<div><strong>坐标:</strong> \${geoData.lat}, \${geoData.lon}</div>\`;
+                  if (geoData.timezone) detailsHtml += \`<div><strong>时区:</strong> \${geoData.timezone}</div>\`;
+                  if (geoData.isp) detailsHtml += \`<div><strong>ISP:</strong> \${geoData.isp}</div>\`;
+                  if (geoData.org) detailsHtml += \`<div><strong>组织:</strong> \${geoData.org}</div>\`;
+                  if (geoData.as) detailsHtml += \`<div><strong>AS:</strong> \${geoData.as}</div>\`;
+                  if (geoData.query) detailsHtml += \`<div><strong>IP:</strong> \${geoData.query}</div>\`;
+                  
+                  detailsDiv.innerHTML = detailsHtml;
+                  detailsDiv.style.display = 'block';
+                } else {
+                  geoInfoSpan.textContent = '获取失败';
+                }
+              }).catch(() => {
+                const geoInfoSpan = recordDiv.querySelector('.geo-info');
+                geoInfoSpan.classList.remove('geo-loading');
+                geoInfoSpan.textContent = '获取失败';
+              });
+            });
+          }
+          
           // 当用户切换到IPv4或IPv6选项卡时，确保显示已加载的地理位置信息
           document.getElementById('ipv4-tab').addEventListener('click', function() {
             // 如果还有加载中的地理位置信息，可以在这里处理
@@ -1505,7 +1736,7 @@ async function HTML() {
             if (json.error) {
               displayError(json.error);
             } else {
-              displayRecords(json);
+              displayRecords(json, domain);
             }
           } catch (error) {
             displayError('查询失败: ' + error.message);
@@ -1587,6 +1818,69 @@ async function HTML() {
             window.open(jsonUrl.toString(), '_blank');
           });
         });
+
+
+
+        // 获取本地IP信息
+        async function getMyIpInfo() {
+          try {
+            const response = await fetch('/ip-info');
+            const data = await response.json();
+            
+            document.getElementById('myIpLoading').style.display = 'none';
+            document.getElementById('myIpContent').style.display = 'block';
+            
+            const ipInfoHtml = \`
+              <div class="table-responsive">
+                <table class="table table-bordered table-striped">
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">IP地址</td>
+                    <td>\${data.query || '-'}</td>
+                  </tr>
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">国家</td>
+                    <td>\${data.country || '-'} (\${data.countryCode || '-'})</td>
+                  </tr>
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">省份</td>
+                    <td>\${data.regionName || '-'}</td>
+                  </tr>
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">城市</td>
+                    <td>\${data.city || '-'}</td>
+                  </tr>
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">时区</td>
+                    <td>\${data.timezone || '-'}</td>
+                  </tr>
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">ISP</td>
+                    <td>\${data.isp || '-'}</td>
+                  </tr>
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">组织</td>
+                    <td>\${data.org || '-'}</td>
+                  </tr>
+                  <tr>
+                    <td style="width: 30%; font-weight: bold;">坐标</td>
+                    <td>\${data.lat || '-'}, \${data.lon || '-'}</td>
+                  </tr>
+                </table>
+              </div>
+            \`;
+            
+            document.getElementById('myIpContent').innerHTML = ipInfoHtml;
+          } catch (error) {
+            document.getElementById('myIpLoading').style.display = 'none';
+            document.getElementById('myIpContent').style.display = 'block';
+            document.getElementById('myIpContent').textContent = '获取失败: ' + error.message;
+          }
+        }
+
+        // 页面加载时获取IP信息
+        document.addEventListener('DOMContentLoaded', function() {
+          getMyIpInfo();
+        });
   </script>
 </body>
 
@@ -1650,35 +1944,4 @@ async function 整理(内容) {
   const 地址数组 = 替换后的内容.split(',');
 
   return 地址数组;
-}
-
-async function nginx() {
-  const text = `
-	<!DOCTYPE html>
-	<html>
-	<head>
-	<title>Welcome to nginx!</title>
-	<style>
-		body {
-			width: 35em;
-			margin: 0 auto;
-			font-family: Tahoma, Verdana, Arial, sans-serif;
-		}
-	</style>
-	</head>
-	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and
-	working. Further configuration is required.</p>
-	
-	<p>For online documentation and support please refer to
-	<a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at
-	<a href="http://nginx.com/">nginx.com</a>.</p>
-	
-	<p><em>Thank you for using nginx.</em></p>
-	</body>
-	</html>
-	`
-  return text;
 }
