@@ -1147,7 +1147,7 @@ async function HTML() {
     <div class="card">
       <div class="card-header">网络测速</div>
       <div class="card-body">
-        <iframe src="https://test.ustc.edu.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px;"></iframe>
+        <iframe src="https://www.speedtest.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px;"></iframe>
       </div>
     </div>
 
