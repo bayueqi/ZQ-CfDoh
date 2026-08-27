@@ -1,7 +1,7 @@
 let DoH = "cloudflare-dns.com";
 const jsonDoH = `https://${DoH}/resolve`;
 const dnsDoH = `https://${DoH}/dns-query`;
-let DoH路径 = 'dns-query';
+let DoH路径 = 'dns';
 export default {
   async fetch(request, env) {
     if (env.DOH) {
@@ -531,7 +531,7 @@ async function HTML() {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ZQ-DohSpeed</title>
+  <title>ZQ-Doh</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg t='1776862807100' class='icon' viewBox='0 0 1024 1024' version='1.1' xmlns='http://www.w3.org/2000/svg' p-id='1867' width='200' height='200'><path d='M512 83.2h19.2V64H512C265.6 64 64 265.6 64 512h19.2c0-236.8 192-428.8 428.8-428.8zM944 512c0 230.4-182.4 422.4-412.8 428.8v19.2C768 950.4 960 755.2 960 512h-16z m-38.4 0c0-208-169.6-377.6-377.6-377.6S153.6 304 153.6 512c0 208 169.6 377.6 377.6 377.6 208 0 374.4-169.6 374.4-377.6zM188.8 512c0-188.8 153.6-339.2 339.2-339.2S870.4 323.2 870.4 512c0 188.8-153.6 339.2-339.2 339.2-188.8 3.2-342.4-150.4-342.4-339.2z m342.4 64c19.2 19.2 44.8 28.8 70.4 28.8h19.2c60.8 0 108.8-48 108.8-108.8v-70.4c0-28.8-12.8-54.4-32-76.8s-48-32-76.8-32h-19.2c-25.6 0-51.2 9.6-70.4 28.8v-32h-35.2v393.6h35.2V576z m0-153.6c0-38.4 32-70.4 70.4-70.4h19.2c38.4 0 70.4 32 70.4 70.4v70.4c0 38.4-32 70.4-70.4 70.4h-19.2c-38.4 0-70.4-32-70.4-70.4v-70.4z m-144 288h35.2V313.6h-35.2v396.8z' fill='' p-id='1868'></path></svg>">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
   <style>
@@ -1023,7 +1023,7 @@ async function HTML() {
 </head>
 
 <body>
-  <a href="https://github.com/bayueqi/ZQ-DohSpeed" target="_blank" class="github-corner" aria-label="View source on Github">
+  <a href="https://github.com/bayueqi/ZQ-Doh" target="_blank" class="github-corner" aria-label="View source on Github">
     <svg viewBox="0 0 250 250" aria-hidden="true">
       <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path>
       <path
@@ -1035,7 +1035,7 @@ async function HTML() {
     </svg>
   </a>
   <div class="container">
-    <h1 class="text-center mb-4">ZQ-DohSpeed</h1>
+    <h1 class="text-center mb-4">ZQ-Doh</h1>
     <div class="card">
       <div class="card-header">DNS 查询设置</div>
       <div class="card-body">
@@ -1145,13 +1145,6 @@ async function HTML() {
     </div>
 
     <div class="card">
-      <div class="card-header">网络测速</div>
-      <div class="card-body">
-        <iframe src="https://www.speedtest.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px;"></iframe>
-      </div>
-    </div>
-
-    <div class="card">
       <div class="card-header">我的IP信息</div>
       <div class="card-body">
         <div id="myIpInfo">
@@ -1161,8 +1154,15 @@ async function HTML() {
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-header">网络测速</div>
+      <div class="card-body">
+        <iframe src="https://www.speedtest.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px;"></iframe>
+      </div>
+    </div>
+
     <div class="beian-info">
-      <p><strong>ZQ-DohSpeed：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span
+      <p><strong>ZQ-Doh：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span
               id="currentDomain">...</span>/${DoH路径}</span></strong><br>基于 Cloudflare Workers 上游 ${DoH} 的 DoH 
         解析与测速服务</p>
     </div>
