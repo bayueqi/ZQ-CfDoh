@@ -1,7 +1,7 @@
 let DoH = "cloudflare-dns.com";
 const jsonDoH = `https://${DoH}/resolve`;
 const dnsDoH = `https://${DoH}/dns-query`;
-let DoH路径 = 'dns';
+let DoH路径 = 'dns-query';
 export default {
   async fetch(request, env) {
     if (env.DOH) {
@@ -602,6 +602,111 @@ async function HTML() {
       border-bottom: none;
     }
 
+    /* 卡内分节标题（DNS 查询设置与解析结果同卡） */
+    .result-divider {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 20px;
+      padding-top: 15px;
+      border-top: 1px solid rgba(253, 101, 60, 0.25);
+      font-weight: 600;
+      color: rgb(70, 50, 40);
+    }
+
+    /* 折叠面板样式 */
+    .collapse-card {
+      margin-bottom: 20px;
+      border-radius: 12px;
+      overflow: hidden;
+      background-color: rgba(255, 255, 255, 0.8);
+      backdrop-filter: blur(5px);
+      -webkit-backdrop-filter: blur(5px);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+    }
+
+    .collapse-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: none;
+      outline: none;
+      cursor: pointer;
+      padding: 14px 20px;
+      font-size: 1rem;
+      font-weight: 600;
+      text-align: left;
+      color: rgb(70, 50, 40);
+      background: linear-gradient(to right, rgba(255, 242, 235, 0.9), rgba(255, 240, 230, 0.75));
+      transition: all 0.3s ease;
+    }
+
+    .collapse-toggle:hover {
+      background: linear-gradient(to right, rgba(255, 228, 214, 0.95), rgba(255, 222, 205, 0.8));
+      box-shadow: inset 4px 0 0 rgb(253, 101, 60);
+      padding-left: 26px;
+    }
+
+    .collapse-title {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .collapse-icon {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      color: rgb(253, 101, 60);
+      transform: rotate(-90deg);
+      transition: transform 0.35s ease;
+    }
+
+    .collapse-toggle:hover .collapse-icon {
+      transform: rotate(-45deg) scale(1.15);
+    }
+
+    .collapse-toggle.open .collapse-icon {
+      transform: rotate(0deg) scale(1);
+    }
+
+    .collapse-content {
+      display: grid;
+      grid-template-rows: 0fr;
+      transition: grid-template-rows 0.4s ease;
+    }
+
+    .collapse-content.open {
+      grid-template-rows: 1fr;
+    }
+
+    .collapse-inner {
+      min-height: 0;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateY(-8px);
+      transition: opacity 0.35s ease, transform 0.35s ease;
+    }
+
+    .collapse-content.open .collapse-inner {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* 去除折叠面板尾部留白 */
+    .collapse-inner > .card:last-child {
+      margin-bottom: 0;
+    }
+
     .form-label {
       font-weight: 500;
       margin-bottom: 8px;
@@ -1036,8 +1141,20 @@ async function HTML() {
   </a>
   <div class="container">
     <h1 class="text-center mb-4">ZQ-Doh</h1>
-    <div class="card">
-      <div class="card-header">DNS 查询设置</div>
+
+    <!-- DNS 查询折叠区：展开后显示查询设置 / 解析结果 / 我的IP信息 -->
+    <div class="collapse-card">
+      <button type="button" class="collapse-toggle" data-target="dnsSection" aria-expanded="false">
+        <span class="collapse-title">DNS</span>
+        <svg class="collapse-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div class="collapse-content" id="dnsSection">
+        <div class="collapse-inner">
+
+          <div class="card">
+            <div class="card-header">DNS 查询设置</div>
       <div class="card-body">
         <form id="resolveForm">
           <div class="mb-3">
@@ -1076,15 +1193,11 @@ async function HTML() {
             <button type="button" class="btn btn-outline-primary" id="getJsonBtn">Get Json</button>
           </div>
         </form>
-      </div>
-    </div>
 
-    <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span>解析结果</span>
-        <button class="btn btn-sm btn-outline-secondary" id="copyBtn" style="display: none;">复制结果</button>
-      </div>
-      <div class="card-body">
+        <div class="result-divider">
+          <span>解析结果</span>
+          <button class="btn btn-sm btn-outline-secondary" id="copyBtn" style="display: none;">复制结果</button>
+        </div>
         <div id="loading" class="loading">
           <div class="loading-spinner"></div>
           <p>正在查询中，请稍候...</p>
@@ -1144,20 +1257,32 @@ async function HTML() {
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">我的IP信息</div>
-      <div class="card-body">
-        <div id="myIpInfo">
-          <div class="text-center text-muted" id="myIpLoading">加载中...</div>
-          <div id="myIpContent" style="display: none;"></div>
+          <div class="card">
+            <div class="card-header">我的IP信息</div>
+            <div class="card-body">
+              <div id="myIpInfo">
+                <div class="text-center text-muted" id="myIpLoading">加载中...</div>
+                <div id="myIpContent" style="display: none;"></div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
-    </div>
+    </div><!-- /DNS 查询折叠区 -->
 
-    <div class="card">
-      <div class="card-header">网络测速</div>
-      <div class="card-body">
-        <iframe src="https://www.speedtest.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px;"></iframe>
+    <!-- 网络测速折叠区 -->
+    <div class="collapse-card">
+      <button type="button" class="collapse-toggle" data-target="speedSection" aria-expanded="false">
+        <span class="collapse-title">测速</span>
+        <svg class="collapse-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div class="collapse-content" id="speedSection">
+        <div class="collapse-inner">
+          <iframe data-src="https://www.speedtest.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px; display: block;"></iframe>
+        </div>
       </div>
     </div>
 
@@ -1880,6 +2005,21 @@ async function HTML() {
         // 页面加载时获取IP信息
         document.addEventListener('DOMContentLoaded', function() {
           getMyIpInfo();
+        });
+
+        // 折叠面板交互（DNS 查询设置 / 网络测速）
+        document.querySelectorAll('.collapse-toggle').forEach(function(btn) {
+          btn.addEventListener('click', function() {
+            const target = document.getElementById(btn.dataset.target);
+            const isOpen = target.classList.toggle('open');
+            btn.classList.toggle('open', isOpen);
+            btn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+            // 首次展开网络测速时才加载测速页面，避免默认折叠时白白消耗流量
+            const iframe = target.querySelector('iframe[data-src]');
+            if (isOpen && iframe && !iframe.getAttribute('src')) {
+              iframe.setAttribute('src', iframe.dataset.src);
+            }
+          });
         });
   </script>
 </body>
