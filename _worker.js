@@ -262,7 +262,13 @@ export default {
       }
     }
 
-    return await HTML();
+    // /app 路径返回完整功能页面
+    if (path === '/app') {
+      return await HTML();
+    }
+
+    // 默认返回简洁入口页（伪装用）
+    return await landingHTML();
   }
 }
 
@@ -2084,4 +2090,156 @@ async function 整理(内容) {
   const 地址数组 = 替换后的内容.split(',');
 
   return 地址数组;
+}
+
+// 简洁入口页（伪装用）
+async function landingHTML() {
+  const html = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="个人主页">
+  <title>ZQ-Doh</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    }
+
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background:
+        radial-gradient(ellipse at top left, rgba(253, 101, 60, 0.35), transparent 60%),
+        radial-gradient(ellipse at bottom right, rgba(251, 152, 30, 0.35), transparent 60%),
+        linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      background-attachment: fixed;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 背景装饰圆 */
+    body::before,
+    body::after {
+      content: '';
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.5;
+      z-index: 0;
+      animation: float 8s ease-in-out infinite;
+    }
+
+    body::before {
+      width: 400px; height: 400px;
+      background: #fd653c;
+      top: -100px; left: -100px;
+    }
+
+    body::after {
+      width: 350px; height: 350px;
+      background: #fb981e;
+      bottom: -80px; right: -80px;
+      animation-delay: -4s;
+    }
+
+    @keyframes float {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      50%      { transform: translate(30px, -20px) scale(1.08); }
+    }
+
+    .card {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 60px 80px;
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow:
+        0 8px 32px rgba(0, 0, 0, 0.3),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      animation: fadeInUp 0.8s ease-out;
+    }
+
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(30px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    h1 {
+      font-size: 4rem;
+      font-weight: 700;
+      letter-spacing: 4px;
+      background: linear-gradient(135deg, #fbab4c, #fc673c);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 40px;
+      text-shadow: none;
+    }
+
+    .enter-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 48px;
+      font-size: 1.1rem;
+      font-weight: 500;
+      letter-spacing: 2px;
+      color: #fff;
+      background: linear-gradient(135deg, #fd653c, #fb981e);
+      border: none;
+      border-radius: 50px;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      text-decoration: none;
+      box-shadow: 0 4px 20px rgba(253, 101, 60, 0.4);
+    }
+
+    .enter-btn:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 30px rgba(253, 101, 60, 0.6);
+      letter-spacing: 4px;
+    }
+
+    .enter-btn:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 12px rgba(253, 101, 60, 0.4);
+    }
+
+    .arrow {
+      transition: transform 0.3s ease;
+      display: inline-block;
+    }
+
+    .enter-btn:hover .arrow {
+      transform: translateX(6px);
+    }
+
+    @media (max-width: 576px) {
+      .card { padding: 45px 40px; }
+      h1 { font-size: 2.8rem; letter-spacing: 2px; }
+      .enter-btn { padding: 12px 36px; font-size: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>ZQ-Doh</h1>
+    <a class="enter-btn" href="/app">进入<span class="arrow">→</span></a>
+  </div>
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: { "content-type": "text/html;charset=UTF-8" }
+  });
 }
