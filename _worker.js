@@ -1,48 +1,7 @@
 let DoH = "cloudflare-dns.com";
 const jsonDoH = `https://${DoH}/resolve`;
 const dnsDoH = `https://${DoH}/dns-query`;
-let DoH路径 = 'dns-query';
-const AUTH_COOKIE = 'zqcfdoh_auth';
-
-// 从 Cookie 字符串中读取指定 Cookie 的值
-function getCookie(request, name) {
-  const cookieHeader = request.headers.get('cookie') || '';
-  const cookies = cookieHeader.split(';');
-  for (const cookie of cookies) {
-    const [cookieName, ...cookieRest] = cookie.trim().split('=');
-    if (cookieName === name) {
-      return cookieRest.join('=');
-    }
-  }
-  return null;
-}
-
-// 密码验证：检查 Cookie 或 URL 参数中的 token
-// PASSWORD 必须设置，否则拒绝所有受保护接口的访问
-function checkAuth(request, env) {
-  if (!env.PASSWORD) return false;
-  const url = new URL(request.url);
-  const token = getCookie(request, AUTH_COOKIE) || url.searchParams.get('token');
-  return token === env.PASSWORD;
-}
-
-// 设置认证 Cookie
-function setAuthCookie(value) {
-  return `${AUTH_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`;
-}
-
-// 未授权时返回 JSON 错误（用于 API 调用）
-function unauthorizedJSON() {
-  return new Response(JSON.stringify({
-    error: 'unauthorized',
-    message: '请先通过密码验证',
-    login: '/app'
-  }, null, 2), {
-    status: 401,
-    headers: { 'content-type': 'application/json; charset=UTF-8' }
-  });
-}
-
+let DoHPath = 'dns-query';
 export default {
   async fetch(request, env) {
     if (env.DOH) {
@@ -51,6 +10,9 @@ export default {
       if (match) {
         DoH = match[1];
       }
+    }
+    if (env.DoHPath) {
+      DoHPath = env.DoHPath;
     }
 
     const url = new URL(request.url);
@@ -71,46 +33,44 @@ export default {
       });
     }
 
-    // 密码验证接口（POST /auth）
+    // 解析 cookie（供后面主页面认证检查使用）
+    const cookies = Object.fromEntries(
+      (request.headers.get('Cookie') || '')
+        .split(';')
+        .map(c => c.trim())
+        .filter(c => c)
+        .map(c => {
+          const eq = c.indexOf('=');
+          return eq >= 0 ? [c.slice(0, eq), c.slice(eq + 1)] : [c, ''];
+        })
+    );
+
+    // 处理密码认证路由（验证密码 = DoHPath 变量）
     if (path === '/auth') {
-      if (!env.PASSWORD) {
-        return new Response(JSON.stringify({ success: false, message: '服务端未配置 PASSWORD 变量，请先在 Workers 设置中添加' }), {
-          status: 500,
-          headers: { 'content-type': 'application/json' }
-        });
-      }
-      let body = null;
       if (request.method === 'POST') {
-        try { body = await request.json(); } catch (e) { body = {}; }
-      }
-      const pwd = (body && body.password) || url.searchParams.get('password') || '';
-      if (pwd === env.PASSWORD) {
-        return new Response(JSON.stringify({ success: true, message: '认证成功' }), {
-          headers: {
-            'content-type': 'application/json',
-            'Set-Cookie': setAuthCookie(env.PASSWORD)
-          }
-        });
-      }
-      return new Response(JSON.stringify({ success: false, message: '密码错误' }), {
-        status: 401,
-        headers: { 'content-type': 'application/json' }
-      });
-    }
+        const formData = await request.formData();
+        const password = formData.get('password') || '';
 
-    // 登出接口（POST /logout）
-    if (path === '/logout') {
-      return new Response(JSON.stringify({ success: true, message: '已登出' }), {
-        headers: {
-          'content-type': 'application/json',
-          'Set-Cookie': `${AUTH_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`
+        if (password === DoHPath) {
+          // 密码正确，设置 HttpOnly cookie，跳转回主页
+          return new Response('验证成功，正在跳转...', {
+            status: 302,
+            headers: {
+              'Location': '/',
+              'Set-Cookie': `auth=${btoa(encodeURIComponent(DoHPath))}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`
+            }
+          });
+        } else {
+          // 密码错误，返回密码页并带错误提示
+          return await 密码页('访问码错误，请重试');
         }
-      });
+      }
+      // GET /auth 也返回密码页
+      return await 密码页();
     }
 
-    // 如果请求路径，则作为 DoH 服务器处理（需要密码验证）
-    if (path === `/${DoH路径}`) {
-      if (!checkAuth(request, env)) return unauthorizedJSON();
+    // 如果请求路径，则作为 DoH 服务器处理
+    if (path === `/${DoHPath}`) {
       return await DOHRequest(request);
     }
 
@@ -119,7 +79,6 @@ export default {
     // 文件下载路由 - 处理 /{size}KB, /{size}MB, /{size}GB 这样的请求
     const sizeMatch = path.match(/^\/(\d+)(KB|MB|GB)$/i);
     if (sizeMatch) {
-      if (!checkAuth(request, env)) return unauthorizedJSON();
       const sizeNum = parseInt(sizeMatch[1]);
       const unit = sizeMatch[2].toUpperCase();
       
@@ -162,9 +121,8 @@ export default {
 
 
 
-    // 添加IP地理位置信息查询代理（需要密码验证）
+    // 添加IP地理位置信息查询代理
     if (path === '/ip-info') {
-      if (!checkAuth(request, env)) return unauthorizedJSON();
 
       const ip = url.searchParams.get('ip') || request.headers.get('CF-Connecting-IP');
       if (!ip) {
@@ -225,9 +183,8 @@ export default {
       }
     }
 
-    // 如果请求参数中包含 domain 和 doh，则执行 DNS 解析（需要密码验证）
+    // 如果请求参数中包含 domain 和 doh，则执行 DNS 解析
     if (url.searchParams.has("doh")) {
-      if (!checkAuth(request, env)) return unauthorizedJSON();
       const domain = url.searchParams.get("domain") || url.searchParams.get("name") || "www.google.com";
       const doh = url.searchParams.get("doh") || dnsDoH;
       const type = url.searchParams.get("type") || "all"; // 默认同时查询 A 和 AAAA
@@ -344,16 +301,11 @@ export default {
       }
     }
 
-    // /app 路径：已认证返回主界面，未认证返回密码页
-    if (path === '/app') {
-      if (checkAuth(request, env)) {
-        return await HTML();
-      }
-      return await loginHTML();
+    // 主页面：检查认证 cookie（值 = btoa(encodeURIComponent(DoHPath))），无则返回密码页
+    if (cookies.auth !== btoa(encodeURIComponent(DoHPath))) {
+      return await 密码页();
     }
-
-    // 默认返回简洁入口页（伪装用）
-    return await landingHTML();
+    return await HTML();
   }
 }
 
@@ -614,109 +566,110 @@ async function DOHRequest(request) {
   }
 }
 
-// 密码输入页
-async function loginHTML() {
+// 密码输入页（伪装页）
+async function 密码页(errorMsg = '') {
+  const errorHtml = errorMsg ? `<div style="color:#dc3545;margin-bottom:12px;font-size:14px;">${errorMsg}</div>` : '';
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ZQ-CfDoh - 登录</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-    body {
-      min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      background:
-        radial-gradient(ellipse at top left, rgba(253, 101, 60, 0.35), transparent 60%),
-        radial-gradient(ellipse at bottom right, rgba(251, 152, 30, 0.35), transparent 60%),
-        linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-      background-attachment: fixed; position: relative; overflow: hidden;
-    }
-    body::before, body::after {
-      content: ''; position: absolute; border-radius: 50%; filter: blur(80px);
-      opacity: 0.5; z-index: 0; animation: float 8s ease-in-out infinite;
-    }
-    body::before { width: 400px; height: 400px; background: #fd653c; top: -100px; left: -100px; }
-    body::after { width: 350px; height: 350px; background: #fb981e; bottom: -80px; right: -80px; animation-delay: -4s; }
-    @keyframes float { 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(30px,-20px) scale(1.08);} }
-    .login-card {
-      position: relative; z-index: 1; text-align: center; padding: 50px 60px;
-      border-radius: 24px; background: rgba(255,255,255,0.08);
-      backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
-      border: 1px solid rgba(255,255,255,0.15);
-      box-shadow: 0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1);
-      animation: fadeInUp 0.8s ease-out; min-width: 360px;
-    }
-    @keyframes fadeInUp { from{opacity:0;transform:translateY(30px);} to{opacity:1;transform:translateY(0);} }
-    .logo {
-      font-size: 3rem; font-weight: 700; letter-spacing: 3px;
-      background: linear-gradient(135deg, #fbab4c, #fc673c);
-      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
-      margin-bottom: 10px;
-    }
-    .subtitle { color: rgba(255,255,255,0.6); margin-bottom: 30px; font-size: 0.95rem; }
-    .password-input {
-      width: 100%; padding: 14px 18px; font-size: 1rem;
-      border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);
-      background: rgba(255,255,255,0.1); color: #fff;
-      outline: none; transition: all 0.3s ease; letter-spacing: 1px;
-    }
-    .password-input::placeholder { color: rgba(255,255,255,0.4); letter-spacing: normal; }
-    .password-input:focus { border-color: rgba(253,101,60,0.6); box-shadow: 0 0 0 3px rgba(253,101,60,0.2); background: rgba(255,255,255,0.15); }
-    .login-btn {
-      width: 100%; margin-top: 20px; padding: 14px; font-size: 1.05rem; font-weight: 500; letter-spacing: 4px;
-      color: #fff; background: linear-gradient(135deg, #fd653c, #fb981e);
-      border: none; border-radius: 12px; cursor: pointer;
-      transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
-      box-shadow: 0 4px 20px rgba(253,101,60,0.4);
-    }
-    .login-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(253,101,60,0.6); }
-    .login-btn:active { transform: translateY(0); }
-    .error-msg { color: #ff6b6b; margin-top: 15px; font-size: 0.9rem; min-height: 1.2rem; }
-    .back-link { display: inline-block; margin-top: 20px; color: rgba(255,255,255,0.6); font-size: 0.85rem; text-decoration: none; transition: color 0.3s; }
-    .back-link:hover { color: #fbab4c; }
-    @media (max-width: 480px) {
-      .login-card { padding: 40px 30px; min-width: auto; width: 90vw; }
-      .logo { font-size: 2.2rem; }
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>请输入访问码</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: url('https://cf-assets.www.cloudflare.com/dzlvafdwdttg/5B5shLB8bSKIyB9NJ6R1jz/87e7617be2c61603d46003cb3f1bd382/Hero-globe-bg-takeover-xxl.png'),
+      linear-gradient(135deg, rgba(253, 101, 60, 0.85) 0%, rgba(251,152,30, 0.85) 100%);
+    background-size: cover;
+    background-position: center center;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+    padding: 20px;
+  }
+  .login-card {
+    width: 100%;
+    max-width: 380px;
+    background-color: rgba(255, 255, 255, 0.72);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    padding: 36px 32px;
+  }
+  h1 {
+    text-align: center;
+    font-weight: 600;
+    font-size: 22px;
+    background-image: linear-gradient(to right, rgb(249, 171, 76), rgb(252, 103, 60));
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 24px;
+  }
+  label {
+    display: block;
+    font-size: 14px;
+    font-weight: 500;
+    color: rgb(70, 50, 40);
+    margin-bottom: 8px;
+  }
+  input[type="password"] {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 8px;
+    border: 1px solid rgba(253, 101, 60, 0.3);
+    background-color: rgba(255, 255, 255, 0.9);
+    font-size: 15px;
+    outline: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  input[type="password"]:focus {
+    border-color: rgb(253, 101, 60);
+    box-shadow: 0 0 0 3px rgba(253, 101, 60, 0.15);
+  }
+  button[type="submit"] {
+    width: 100%;
+    margin-top: 20px;
+    padding: 12px;
+    border-radius: 8px;
+    border: none;
+    background-color: rgb(253, 101, 60);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.15s ease;
+  }
+  button[type="submit"]:hover {
+    background-color: rgb(230, 90, 50);
+    transform: translateY(-1px);
+  }
+  button[type="submit"]:active {
+    transform: translateY(0);
+  }
+</style>
 </head>
 <body>
   <div class="login-card">
-    <div class="logo">ZQ-CfDoh</div>
-    <div class="subtitle">请输入密码以继续</div>
-    <input type="password" id="pwdInput" class="password-input" placeholder="密码" autocomplete="current-password" autofocus>
-    <button id="loginBtn" class="login-btn">进入</button>
-    <div id="errorMsg" class="error-msg"></div>
-    <a class="back-link" href="/">← 返回首页</a>
+    <h1>ZQ-CfDoh</h1>
+    ${errorHtml}
+    <form method="POST" action="/auth">
+      <label for="pwd">访问码</label>
+      <input type="password" id="pwd" name="password" placeholder="请输入访问码" autofocus autocomplete="current-password">
+      <button type="submit">进入</button>
+    </form>
   </div>
-  <script>
-    const pwdInput = document.getElementById('pwdInput');
-    const loginBtn = document.getElementById('loginBtn');
-    const errorMsg = document.getElementById('errorMsg');
-    async function doLogin() {
-      const pwd = pwdInput.value;
-      if (!pwd) { errorMsg.textContent = '请输入密码'; return; }
-      loginBtn.disabled = true; loginBtn.textContent = '验证中...'; errorMsg.textContent = '';
-      try {
-        const res = await fetch('/auth', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password: pwd })
-        });
-        const data = await res.json();
-        if (data.success) { window.location.href = '/app'; }
-        else { errorMsg.textContent = data.message || '密码错误'; loginBtn.disabled = false; loginBtn.textContent = '进入'; }
-      } catch (e) { errorMsg.textContent = '网络错误，请重试'; loginBtn.disabled = false; loginBtn.textContent = '进入'; }
-    }
-    loginBtn.addEventListener('click', doLogin);
-    pwdInput.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-  </script>
 </body>
 </html>`;
-  return new Response(html, { headers: { 'content-type': 'text/html;charset=UTF-8' } });
+  return new Response(html, {
+    headers: { "content-type": "text/html;charset=UTF-8" }
+  });
 }
 
 async function HTML() {
@@ -1336,10 +1289,7 @@ async function HTML() {
     </svg>
   </a>
   <div class="container">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-      <h1 style="margin:0;" class="text-center">ZQ-CfDoh</h1>
-      <a href="javascript:void(0)" id="logoutBtn" style="color:rgb(253,101,60);text-decoration:none;font-size:14px;border-bottom:1px dashed rgb(253,101,60);">登出</a>
-    </div>
+    <h1 class="text-center mb-4">ZQ-CfDoh</h1>
 
     <!-- DNS 查询折叠区：展开后显示查询设置 / 解析结果 / 我的IP信息 -->
     <div class="collapse-card">
@@ -1486,8 +1436,8 @@ async function HTML() {
     </div>
 
     <div class="beian-info">
-      <p><strong>ZQ-CfDoh：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span
-              id="currentDomain">...</span>/${DoH路径}</span></strong><br>基于 Cloudflare Workers 上游 ${DoH} 的 DoH 
+      <p><strong>DoH端点：<span id="dohUrlDisplay" class="copy-link" title="点击复制">https://<span
+              id="currentDomain">...</span>/${DoHPath}</span></strong><br>基于 Cloudflare Workers 上游 ${DoH} 的 DoH 
         解析与测速服务</p>
     </div>
   </div>
@@ -1498,7 +1448,7 @@ async function HTML() {
     const currentUrl = window.location.href;
     const currentHost = window.location.host;
     const currentProtocol = window.location.protocol;
-    const currentDoHPath = '${DoH路径}';
+    const currentDoHPath = '${DoHPath}';
     const currentDoHUrl = currentProtocol + '//' + currentHost + '/' + currentDoHPath;
 
     // 记录当前使用的 DoH 地址
@@ -2072,16 +2022,6 @@ async function HTML() {
         
         // 页面加载完成后执行
         document.addEventListener('DOMContentLoaded', function() {
-          // 登出按钮
-          const logoutBtn = document.getElementById('logoutBtn');
-          if (logoutBtn) {
-            logoutBtn.addEventListener('click', async function() {
-              if (!confirm('确定要登出吗？')) return;
-              try { await fetch('/logout'); } catch(e) {}
-              window.location.href = '/app';
-            });
-          }
-
           // 使用本地存储记住最后使用的域名
           const lastDomain = localStorage.getItem('lastDomain');
           if (lastDomain) {
@@ -2293,156 +2233,4 @@ async function 整理(内容) {
   const 地址数组 = 替换后的内容.split(',');
 
   return 地址数组;
-}
-
-// 简洁入口页（伪装用）
-async function landingHTML() {
-  const html = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="个人主页">
-  <title>ZQ-CfDoh</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-
-    html, body {
-      height: 100%;
-      font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-    }
-
-    body {
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background:
-        radial-gradient(ellipse at top left, rgba(253, 101, 60, 0.35), transparent 60%),
-        radial-gradient(ellipse at bottom right, rgba(251, 152, 30, 0.35), transparent 60%),
-        linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-      background-attachment: fixed;
-      position: relative;
-      overflow: hidden;
-    }
-
-    /* 背景装饰圆 */
-    body::before,
-    body::after {
-      content: '';
-      position: absolute;
-      border-radius: 50%;
-      filter: blur(80px);
-      opacity: 0.5;
-      z-index: 0;
-      animation: float 8s ease-in-out infinite;
-    }
-
-    body::before {
-      width: 400px; height: 400px;
-      background: #fd653c;
-      top: -100px; left: -100px;
-    }
-
-    body::after {
-      width: 350px; height: 350px;
-      background: #fb981e;
-      bottom: -80px; right: -80px;
-      animation-delay: -4s;
-    }
-
-    @keyframes float {
-      0%, 100% { transform: translate(0, 0) scale(1); }
-      50%      { transform: translate(30px, -20px) scale(1.08); }
-    }
-
-    .card {
-      position: relative;
-      z-index: 1;
-      text-align: center;
-      padding: 60px 80px;
-      border-radius: 24px;
-      background: rgba(255, 255, 255, 0.08);
-      backdrop-filter: blur(24px);
-      -webkit-backdrop-filter: blur(24px);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      box-shadow:
-        0 8px 32px rgba(0, 0, 0, 0.3),
-        inset 0 1px 0 rgba(255, 255, 255, 0.1);
-      animation: fadeInUp 0.8s ease-out;
-    }
-
-    @keyframes fadeInUp {
-      from { opacity: 0; transform: translateY(30px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
-
-    h1 {
-      font-size: 4rem;
-      font-weight: 700;
-      letter-spacing: 4px;
-      background: linear-gradient(135deg, #fbab4c, #fc673c);
-      -webkit-background-clip: text;
-      background-clip: text;
-      -webkit-text-fill-color: transparent;
-      margin-bottom: 40px;
-      text-shadow: none;
-    }
-
-    .enter-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      padding: 14px 48px;
-      font-size: 1.1rem;
-      font-weight: 500;
-      letter-spacing: 2px;
-      color: #fff;
-      background: linear-gradient(135deg, #fd653c, #fb981e);
-      border: none;
-      border-radius: 50px;
-      cursor: pointer;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      text-decoration: none;
-      box-shadow: 0 4px 20px rgba(253, 101, 60, 0.4);
-    }
-
-    .enter-btn:hover {
-      transform: translateY(-3px);
-      box-shadow: 0 8px 30px rgba(253, 101, 60, 0.6);
-      letter-spacing: 4px;
-    }
-
-    .enter-btn:active {
-      transform: translateY(0);
-      box-shadow: 0 2px 12px rgba(253, 101, 60, 0.4);
-    }
-
-    .arrow {
-      transition: transform 0.3s ease;
-      display: inline-block;
-    }
-
-    .enter-btn:hover .arrow {
-      transform: translateX(6px);
-    }
-
-    @media (max-width: 576px) {
-      .card { padding: 45px 40px; }
-      h1 { font-size: 2.8rem; letter-spacing: 2px; }
-      .enter-btn { padding: 12px 36px; font-size: 1rem; }
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>ZQ-CfDoh</h1>
-    <a class="enter-btn" href="/app">进入<span class="arrow">→</span></a>
-  </div>
-</body>
-</html>`;
-
-  return new Response(html, {
-    headers: { "content-type": "text/html;charset=UTF-8" }
-  });
 }
