@@ -400,7 +400,7 @@ async function refreshBaseSet() {
 }
 
 // 三张表各缓存 60 秒，避免每个 DNS 查询都打库
-const setMemo = { allowlist: { set: null, at: 0 }, rules: { set: null, at: 0 }, removed: { set: null, at: 0 } };
+const setMemo = { allowlist: { set: null, at: 0 }, rules: { set: null, at: 0 } };
 
 async function getDomainSet(env, table) {
   const m = setMemo[table];
@@ -417,14 +417,11 @@ async function getDomainSet(env, table) {
   return set;
 }
 
-// 逐级后缀比对：白名单 > 移出 > （大名单 + 手动加的）
-function isBlocked(name, base, rules, allow, removed) {
+// 逐级后缀比对：白名单优先，其次大名单 + 手动加的
+function isBlocked(name, base, rules, allow) {
   const p = name.split('.');
   for (let i = 0; i < p.length - 1; i++) {
     if (allow.has(p.slice(i).join('.'))) return false;
-  }
-  for (const r of removed) {
-    if (name === r || name.endsWith('.' + r)) return false;
   }
   for (let i = 0; i < p.length - 1; i++) {
     const s = p.slice(i).join('.');
@@ -479,8 +476,7 @@ function fromB64url(s) {
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS hits (domain TEXT, ts INTEGER)',
   'CREATE TABLE IF NOT EXISTS allowlist (domain TEXT PRIMARY KEY, ts INTEGER)',
-  'CREATE TABLE IF NOT EXISTS rules (domain TEXT PRIMARY KEY, ts INTEGER)',
-  'CREATE TABLE IF NOT EXISTS removed (domain TEXT PRIMARY KEY, ts INTEGER)'
+  'CREATE TABLE IF NOT EXISTS rules (domain TEXT PRIMARY KEY, ts INTEGER)'
 ];
 let schemaReady = false;
 
@@ -516,36 +512,16 @@ async function blockedApi(url, env) {
     return json({ ok: true, domain: d });
   }
 
-  // 查这个域名当前在不在拦截名单里，面板据此把按钮切成「拦截 / 删除」
-  if (action === 'check') {
-    const d = normalizeDomain(url.searchParams.get('d'));
-    if (!d) return json({ error: '域名不合法' }, 400);
-    const base = await getBaseSet(env);
-    const rules = await getDomainSet(env, 'rules');
-    const allow = await getDomainSet(env, 'allowlist');
-    const removed = await getDomainSet(env, 'removed');
-    return json({ domain: d, blocked: isBlocked(d, base, rules, allow, removed) });
-  }
-
-  // 往名单里加 / 从名单里删，默认名单里的条目也能删
+  // 手动加 / 手动删，只动 rules 表
   if (action === 'block' || action === 'unblock') {
     const d = normalizeDomain(url.searchParams.get('d'));
     if (!d) return json({ error: '域名不合法' }, 400);
     if (action === 'block') {
-      const base = await getBaseSet(env);
-      await db.prepare('DELETE FROM removed WHERE domain = ?').bind(d).run();
-      if (!base.has(d)) {
-        await db.prepare('INSERT OR REPLACE INTO rules (domain, ts) VALUES (?, ?)').bind(d, Date.now()).run();
-      }
+      await db.prepare('INSERT OR REPLACE INTO rules (domain, ts) VALUES (?, ?)').bind(d, Date.now()).run();
     } else {
       await db.prepare('DELETE FROM rules WHERE domain = ?').bind(d).run();
-      const base = await getBaseSet(env);
-      if (base.has(d)) {
-        await db.prepare('INSERT OR REPLACE INTO removed (domain, ts) VALUES (?, ?)').bind(d, Date.now()).run();
-      }
     }
     setMemo.rules.at = 0;
-    setMemo.removed.at = 0;
     return json({ ok: true, domain: d });
   }
 
@@ -571,15 +547,9 @@ async function blockedApi(url, env) {
   try {
     rules = await db.prepare('SELECT domain FROM rules ORDER BY ts DESC').all();
   } catch (e) {}
-  let removed = { results: [] };
-  try {
-    removed = await db.prepare('SELECT domain FROM removed ORDER BY ts DESC').all();
-  } catch (e) {}
 
   const base = await getBaseSet(env);
-  let count = base.size;
-  for (const x of removed.results || []) if (base.has(x.domain)) count--;
-  for (const x of rules.results || []) if (!base.has(x.domain)) count++;
+  const count = base.size + (rules.results || []).length;
 
   return json({
     total: (total && total.n) || 0,
@@ -625,7 +595,6 @@ async function DOHRequest(request, env, ctx) {
     // 拦截判断：命中名单就地返回，不发给上游
     const baseSet = await getBaseSet(env);
     const ruleSet = await getDomainSet(env, 'rules');
-    const removeSet = await getDomainSet(env, 'removed');
     if (baseSet.size || ruleSet.size) {
       const allowSet = await getDomainSet(env, 'allowlist');
       let rawQ = null;
@@ -643,7 +612,7 @@ async function DOHRequest(request, env, ctx) {
         }
       }
 
-      if (q && isBlocked(q.name, baseSet, ruleSet, allowSet, removeSet)) {
+      if (q && isBlocked(q.name, baseSet, ruleSet, allowSet)) {
         logHit(env, ctx, q.name);
         return new Response(nxd(rawQ, q.end), {
           headers: {
@@ -656,7 +625,7 @@ async function DOHRequest(request, env, ctx) {
       // JSON 接口按 name 参数拦
       if (method === 'GET' && searchParams.has('name')) {
         const n = normalizeDomain(searchParams.get('name'));
-        if (n && isBlocked(n, baseSet, ruleSet, allowSet, removeSet)) {
+        if (n && isBlocked(n, baseSet, ruleSet, allowSet)) {
           logHit(env, ctx, n);
           return new Response(JSON.stringify({
             Status: 3,
@@ -2561,7 +2530,6 @@ async function HTML() {
           const ruleBtn = document.getElementById('ruleBtn');
           const ruleSubEl = document.getElementById('ruleSub');
           const refreshBtn = document.getElementById('refreshBtn');
-          let ruleMode = 'block';
 
           function esc(s) {
             return String(s).replace(/[&<>"]/g, function (c) {
@@ -2604,7 +2572,7 @@ async function HTML() {
 
             ruleSubEl.textContent = '拦截名单（' + (d.count || 0).toLocaleString() + ' 条）';
             tags(tagsEl, d.allow, '白名单为空', 'unallow');
-            tags(ruleTagsEl, d.rules || [], '默认名单之外没有额外添加的域名', 'unblock');
+            tags(ruleTagsEl, d.rules || [], '还没有自己添加的域名', 'unblock');
           }
 
           async function load() {
@@ -2625,8 +2593,6 @@ async function HTML() {
               if (d.error) throw new Error(d.error);
               inputEl.value = '';
               ruleInputEl.value = '';
-              ruleMode = 'block';
-              ruleBtn.textContent = '拦截';
               await load();
             } catch (e) {
               alert('操作失败：' + e.message);
@@ -2648,37 +2614,14 @@ async function HTML() {
             if (e.key === 'Enter') allowBtn.click();
           });
 
-          // 输入框里的域名当前在不在名单里，决定按钮是「拦截」还是「删除」
-          let checkTimer = null;
-
-          function refreshRuleBtn() {
-            const v = ruleInputEl.value.trim();
-            clearTimeout(checkTimer);
-            if (!v) {
-              ruleMode = 'block';
-              ruleBtn.textContent = '拦截';
-              return;
-            }
-            checkTimer = setTimeout(async function () {
-              try {
-                const r = await fetch('/blocked/api?action=check&d=' + encodeURIComponent(v));
-                const d = await r.json();
-                if (!d || d.error || ruleInputEl.value.trim() !== v) return;
-                ruleMode = d.blocked ? 'unblock' : 'block';
-                ruleBtn.textContent = d.blocked ? '删除' : '拦截';
-              } catch (e) {}
-            }, 250);
-          }
-
-          ruleInputEl.addEventListener('input', refreshRuleBtn);
-
+          // 输入框只负责加；删走下面标签上的 ×
           ruleInputEl.addEventListener('keydown', function (e) {
             if (e.key === 'Enter') ruleBtn.click();
           });
 
           ruleBtn.addEventListener('click', function () {
             const v = ruleInputEl.value.trim();
-            if (v) act(ruleMode, v);
+            if (v) act('block', v);
           });
 
           refreshBtn.addEventListener('click', function () {
