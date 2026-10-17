@@ -1,15 +1,14 @@
 let DoH = "cloudflare-dns.com";
-const jsonDoH = `https://${DoH}/resolve`;
-const dnsDoH = `https://${DoH}/dns-query`;
+let dnsDoH = `https://${DoH}/dns-query`;
+let jsonDoH = `https://${DoH}/resolve`;
 let DoHPath = 'dns-query';
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
+    // 上游可用环境变量 DOH 覆盖，两个地址跟着一起变
     if (env.DOH) {
-      DoH = env.DOH;
-      const match = DoH.match(/:\/\/([^\/]+)/);
-      if (match) {
-        DoH = match[1];
-      }
+      DoH = (env.DOH.match(/:\/\/([^\/]+)/) || [])[1] || env.DOH;
+      dnsDoH = `https://${DoH}/dns-query`;
+      jsonDoH = `https://${DoH}/resolve`;
     }
     if (env.DoHPath) {
       DoHPath = env.DoHPath;
@@ -17,9 +16,6 @@ export default {
 
     const url = new URL(request.url);
     const path = url.pathname;
-    const hostname = url.hostname;
-    
-    const colo = request.cf?.colo || '未知';
 
     // 处理 OPTIONS 预检请求
     if (request.method === 'OPTIONS') {
@@ -71,55 +67,54 @@ export default {
 
     // 如果请求路径，则作为 DoH 服务器处理
     if (path === `/${DoHPath}`) {
-      return await DOHRequest(request);
+      return await DOHRequest(request, env, ctx);
     }
 
 
     
-    // 文件下载路由 - 处理 /{size}KB, /{size}MB, /{size}GB 这样的请求
+    // 文件下载路由：/{size}KB|MB|GB，代理到 speed.cloudflare.com
     const sizeMatch = path.match(/^\/(\d+)(KB|MB|GB)$/i);
     if (sizeMatch) {
-      const sizeNum = parseInt(sizeMatch[1]);
-      const unit = sizeMatch[2].toUpperCase();
-      
-      let sizeBytes;
-      let displaySize;
-      
-      switch (unit) {
-        case 'KB':
-          sizeBytes = sizeNum * 1000;
-          displaySize = `${sizeNum}KB`;
-          break;
-        case 'MB':
-          sizeBytes = sizeNum * 1000000;
-          displaySize = `${sizeNum}MB`;
-          break;
-        case 'GB':
-          sizeBytes = sizeNum * 1000000000;
-          displaySize = `${sizeNum}GB`;
-          break;
-      }
-      
-      const targetUrl = `https://speed.cloudflare.com/__down?bytes=${sizeBytes}`;
+      const bytes = parseInt(sizeMatch[1]) * { KB: 1e3, MB: 1e6, GB: 1e9 }[sizeMatch[2].toUpperCase()];
       const headers = new Headers(request.headers);
       headers.set('referer', 'https://speed.cloudflare.com/');
-      
-      const response = await fetch(new Request(targetUrl, {
+      const res = await fetch(new Request(`https://speed.cloudflare.com/__down?bytes=${bytes}`, {
         method: request.method === 'HEAD' ? 'GET' : request.method,
         headers: headers,
         body: request.body
       }));
-      
-      const newHeaders = new Headers(response.headers);
-      
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: newHeaders
+      return new Response(res.body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers
       });
     }
 
 
+
+    // 拦截记录与白名单接口
+    if (path === '/blocked/api') {
+      if (cookies.auth !== btoa(encodeURIComponent(DoHPath))) {
+        return new Response(JSON.stringify({ error: 'unauthorized' }), {
+          status: 401,
+          headers: { 'content-type': 'application/json; charset=UTF-8' }
+        });
+      }
+      if (!env.cfdoh) {
+        return new Response(JSON.stringify({ error: '未绑定 D1，变量名需为 cfdoh' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json; charset=UTF-8' }
+        });
+      }
+      try {
+        return await blockedApi(url, env);
+      } catch (err) {
+        return new Response(JSON.stringify({ error: err.message }), {
+          status: 500,
+          headers: { 'content-type': 'application/json; charset=UTF-8' }
+        });
+      }
+    }
 
     // 添加IP地理位置信息查询代理
     if (path === '/ip-info') {
@@ -191,102 +186,14 @@ export default {
 
       // 如果使用的是当前站点，则使用 DoH 服务
       if (doh.includes(url.host)) {
-        return await handleLocalDoHRequest(domain, type, hostname);
+        return await handleLocalDoHRequest(domain, type);
       }
 
       try {
-        // 根据请求类型进行不同的处理
-        if (type === "all") {
-          // 同时请求 A、AAAA 和 NS 记录，使用新的查询函数
-          const ipv4Result = await queryDns(doh, domain, "A");
-          const ipv6Result = await queryDns(doh, domain, "AAAA");
-          const nsResult = await queryDns(doh, domain, "NS");
-
-          // 合并结果 - 修改Question字段处理方式以兼容不同格式
-          const combinedResult = {
-            Status: ipv4Result.Status || ipv6Result.Status || nsResult.Status,
-            TC: ipv4Result.TC || ipv6Result.TC || nsResult.TC,
-            RD: ipv4Result.RD || ipv6Result.RD || nsResult.RD,
-            RA: ipv4Result.RA || ipv6Result.RA || nsResult.RA,
-            AD: ipv4Result.AD || ipv6Result.AD || nsResult.AD,
-            CD: ipv4Result.CD || ipv6Result.CD || nsResult.CD,
-
-            // 修改处理Question字段的方式，兼容对象格式和数组格式
-            Question: [],
-
-            Answer: [...(ipv4Result.Answer || []), ...(ipv6Result.Answer || [])],
-            ipv4: {
-              records: ipv4Result.Answer || []
-            },
-            ipv6: {
-              records: ipv6Result.Answer || []
-            },
-            ns: {
-              records: []
-            }
-          };
-
-          // 正确处理Question字段，无论是对象还是数组
-          if (ipv4Result.Question) {
-            if (Array.isArray(ipv4Result.Question)) {
-              combinedResult.Question.push(...ipv4Result.Question);
-            } else {
-              combinedResult.Question.push(ipv4Result.Question);
-            }
-          }
-
-          if (ipv6Result.Question) {
-            if (Array.isArray(ipv6Result.Question)) {
-              combinedResult.Question.push(...ipv6Result.Question);
-            } else {
-              combinedResult.Question.push(ipv6Result.Question);
-            }
-          }
-
-          if (nsResult.Question) {
-            if (Array.isArray(nsResult.Question)) {
-              combinedResult.Question.push(...nsResult.Question);
-            } else {
-              combinedResult.Question.push(nsResult.Question);
-            }
-          }
-
-          // 处理NS记录 - 可能在Answer或Authority部分
-          const nsRecords = [];
-
-          // 从Answer部分收集NS记录
-          if (nsResult.Answer && nsResult.Answer.length > 0) {
-            nsResult.Answer.forEach(record => {
-              if (record.type === 2) { // NS记录类型是2
-                nsRecords.push(record);
-              }
-            });
-          }
-
-          // 从Authority部分收集NS和SOA记录
-          if (nsResult.Authority && nsResult.Authority.length > 0) {
-            nsResult.Authority.forEach(record => {
-              if (record.type === 2 || record.type === 6) { // NS=2, SOA=6
-                nsRecords.push(record);
-                // 也添加到总Answer数组
-                combinedResult.Answer.push(record);
-              }
-            });
-          }
-
-          // 设置NS记录集合
-          combinedResult.ns.records = nsRecords;
-
-          return new Response(JSON.stringify(combinedResult, null, 2), {
-            headers: { "content-type": "application/json; charset=UTF-8" }
-          });
-        } else {
-          // 普通的单类型查询，使用新的查询函数
-          const result = await queryDns(doh, domain, type);
-          return new Response(JSON.stringify(result, null, 2), {
-            headers: { "content-type": "application/json; charset=UTF-8" }
-          });
-        }
+        const result = type === "all" ? await queryAll(doh, domain) : await queryDns(doh, domain, type);
+        return new Response(JSON.stringify(result, null, 2), {
+          headers: { "content-type": "application/json; charset=UTF-8" }
+        });
       } catch (err) {
         console.error("DNS 查询失败:", err);
         return new Response(JSON.stringify({
@@ -377,92 +284,330 @@ async function queryDns(dohServer, domain, type) {
   throw lastError || new Error("无法完成 DNS 查询");
 }
 
-// 处理本地 DoH 请求的函数 - 直接调用 DoH，而不是自身服务
-async function handleLocalDoHRequest(domain, type, hostname) {
+// A / AAAA / NS 三路并行后合并成一份（Question 可能是对象也可能是数组）
+async function queryAll(doh, domain) {
+  const [v4, v6, ns] = await Promise.all([
+    queryDns(doh, domain, 'A'),
+    queryDns(doh, domain, 'AAAA'),
+    queryDns(doh, domain, 'NS')
+  ]);
+  const arr = (x) => (Array.isArray(x) ? x : x ? [x] : []);
+  const nsRecords = [
+    ...(ns.Answer || []).filter((r) => r.type === 2),
+    ...(ns.Authority || []).filter((r) => r.type === 2 || r.type === 6)
+  ];
+  return {
+    Status: v4.Status || v6.Status || ns.Status,
+    TC: v4.TC || v6.TC || ns.TC,
+    RD: v4.RD || v6.RD || ns.RD,
+    RA: v4.RA || v6.RA || ns.RA,
+    AD: v4.AD || v6.AD || ns.AD,
+    CD: v4.CD || v6.CD || ns.CD,
+    Question: [...arr(v4.Question), ...arr(v6.Question), ...arr(ns.Question)],
+    Answer: [...(v4.Answer || []), ...(v6.Answer || []), ...nsRecords],
+    ipv4: { records: v4.Answer || [] },
+    ipv6: { records: v6.Answer || [] },
+    ns: { records: nsRecords }
+  };
+}
+
+// 请求目标是本站时，直接问上游，不再绕回自己
+async function handleLocalDoHRequest(domain, type) {
+  const jsonHeaders = {
+    "content-type": "application/json; charset=UTF-8",
+    'Access-Control-Allow-Origin': '*'
+  };
   try {
-    if (type === "all") {
-      // 同时请求 A、AAAA 和 NS 记录
-      const ipv4Promise = queryDns(dnsDoH, domain, "A");
-      const ipv6Promise = queryDns(dnsDoH, domain, "AAAA");
-      const nsPromise = queryDns(dnsDoH, domain, "NS");
-
-      // 等待所有请求完成
-      const [ipv4Result, ipv6Result, nsResult] = await Promise.all([ipv4Promise, ipv6Promise, nsPromise]);
-
-      // 准备NS记录数组
-      const nsRecords = [];
-
-      // 从Answer和Authority部分收集NS记录
-      if (nsResult.Answer && nsResult.Answer.length > 0) {
-        nsRecords.push(...nsResult.Answer.filter(record => record.type === 2));
-      }
-
-      if (nsResult.Authority && nsResult.Authority.length > 0) {
-        nsRecords.push(...nsResult.Authority.filter(record => record.type === 2 || record.type === 6));
-      }
-
-      // 合并结果
-      const combinedResult = {
-        Status: ipv4Result.Status || ipv6Result.Status || nsResult.Status,
-        TC: ipv4Result.TC || ipv6Result.TC || nsResult.TC,
-        RD: ipv4Result.RD || ipv6Result.RD || nsResult.RD,
-        RA: ipv4Result.RA || ipv6Result.RA || nsResult.RA,
-        AD: ipv4Result.AD || ipv6Result.AD || nsResult.AD,
-        CD: ipv4Result.CD || ipv6Result.CD || nsResult.CD,
-        Question: [...(ipv4Result.Question || []), ...(ipv6Result.Question || []), ...(nsResult.Question || [])],
-        Answer: [
-          ...(ipv4Result.Answer || []),
-          ...(ipv6Result.Answer || []),
-          ...nsRecords
-        ],
-        ipv4: {
-          records: ipv4Result.Answer || []
-        },
-        ipv6: {
-          records: ipv6Result.Answer || []
-        },
-        ns: {
-          records: nsRecords
-        }
-      };
-
-      return new Response(JSON.stringify(combinedResult, null, 2), {
-        headers: {
-          "content-type": "application/json; charset=UTF-8",
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
-    } else {
-      // 普通的单类型查询
-      const result = await queryDns(dnsDoH, domain, type);
-      return new Response(JSON.stringify(result, null, 2), {
-        headers: {
-          "content-type": "application/json; charset=UTF-8",
-          'Access-Control-Allow-Origin': '*'
-        }
-      });
-    }
+    const result = type === "all" ? await queryAll(dnsDoH, domain) : await queryDns(dnsDoH, domain, type);
+    return new Response(JSON.stringify(result, null, 2), { headers: jsonHeaders });
   } catch (err) {
     console.error("DoH 查询失败:", err);
     return new Response(JSON.stringify({
       error: `DoH 查询失败: ${err.message}`,
       stack: err.stack
-    }, null, 2), {
-      headers: {
-        "content-type": "application/json; charset=UTF-8",
-        'Access-Control-Allow-Origin': '*'
-      },
-      status: 500
-    });
+    }, null, 2), { headers: jsonHeaders, status: 500 });
   }
 }
 
+// ===== 广告拦截：名单缓存与报文工具 =====
+const dec = new TextDecoder();
+
+function normalizeDomain(s) {
+  if (!s) return '';
+  let d = String(s).trim().toLowerCase().replace(/\.$/, '');
+  if (d.startsWith('https://')) d = d.slice(8);
+  else if (d.startsWith('http://')) d = d.slice(7);
+  d = d.split('/')[0].split(':')[0];
+  return /^[a-z0-9._-]+$/.test(d) && d.includes('.') ? d : '';
+}
+
+// 默认名单放仓库，冷启动按 URL 去边缘缓存取，缓存没了才回 GitHub 拉
+const LIST_URL = 'https://raw.githubusercontent.com/bayueqi/ZQ-CfDoh/main/blocklist.txt';
+const LIST_TTL = 6 * 3600;
+
+let blkSet = null;
+let blkTask = null;
+
+function loadBaseSet() {
+  if (blkSet) return Promise.resolve(blkSet);
+  if (!blkTask) {
+    blkTask = (async () => {
+      const cache = caches.default;
+      const req = new Request(LIST_URL);
+      let res = await cache.match(req);
+      if (!res) {
+        const r = await fetch(req);
+        if (!r.ok) throw new Error('名单 HTTP ' + r.status);
+        res = new Response(r.body, {
+          headers: {
+            'content-type': 'text/plain; charset=utf-8',
+            'cache-control': 'public, max-age=' + LIST_TTL
+          }
+        });
+        await cache.put(req, res.clone());
+      }
+      const text = await res.text();
+      blkSet = new Set(text.split('\n').filter(Boolean));
+      return blkSet;
+    })().catch(() => {
+      blkTask = null;
+      return new Set();
+    });
+  }
+  return blkTask;
+}
+
+async function getBaseSet(env) {
+  const set = await loadBaseSet();
+  if (set.size) return set;
+  // 拉不到名单时退回 KV，两处都没有就当没拦
+  if (env.BLOCK) {
+    try {
+      const t = (await env.BLOCK.get('blocklist')) || '';
+      if (t) return new Set(t.split('\n').filter(Boolean));
+    } catch (e) {}
+  }
+  return set;
+}
+
+// 面板的「刷新名单」：清边缘缓存和内存，下一次查询重新拉
+async function refreshBaseSet() {
+  try {
+    await caches.default.delete(new Request(LIST_URL));
+  } catch (e) {}
+  blkSet = null;
+  blkTask = null;
+}
+
+// 三张表各缓存 60 秒，避免每个 DNS 查询都打库
+const setMemo = { allowlist: { set: null, at: 0 }, rules: { set: null, at: 0 }, removed: { set: null, at: 0 } };
+
+async function getDomainSet(env, table) {
+  const m = setMemo[table];
+  if (m.set && Date.now() - m.at < 60000) return m.set;
+  let set = new Set();
+  if (env.cfdoh) {
+    try {
+      const r = await env.cfdoh.prepare('SELECT domain FROM ' + table).all();
+      set = new Set((r.results || []).map((x) => x.domain));
+    } catch (e) {}
+  }
+  m.set = set;
+  m.at = Date.now();
+  return set;
+}
+
+// 逐级后缀比对：白名单 > 移出 > （大名单 + 手动加的）
+function isBlocked(name, base, rules, allow, removed) {
+  const p = name.split('.');
+  for (let i = 0; i < p.length - 1; i++) {
+    if (allow.has(p.slice(i).join('.'))) return false;
+  }
+  for (const r of removed) {
+    if (name === r || name.endsWith('.' + r)) return false;
+  }
+  for (let i = 0; i < p.length - 1; i++) {
+    const s = p.slice(i).join('.');
+    if (rules.has(s) || base.has(s)) return true;
+  }
+  return false;
+}
+
+function logHit(env, ctx, domain) {
+  if (!env.cfdoh) return;
+  const p = env.cfdoh.prepare('INSERT INTO hits (domain, ts) VALUES (?, ?)')
+    .bind(domain, Date.now())
+    .run();
+  if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+}
+
+// 取报文里的问题域名，end 是问题区结束位置
+function readQuestion(buf) {
+  if (buf.length < 12 || ((buf[4] << 8) | buf[5]) !== 1) return null;
+  const labels = [];
+  let o = 12;
+  while (o < buf.length && buf[o] !== 0) {
+    const n = buf[o];
+    if (n & 0xc0) return null;
+    labels.push(dec.decode(buf.subarray(o + 1, o + 1 + n)));
+    o += n + 1;
+  }
+  if (!labels.length) return null;
+  return { name: labels.join('.').toLowerCase(), end: o + 5 };
+}
+
+// 复制报文头与问题区，答案数清零，打 NXDOMAIN
+function nxd(buf, end) {
+  const out = buf.slice(0, end);
+  out[2] = 0x80 | (buf[2] & 0x01);
+  out[3] = 0x80 | 0x03;
+  out[4] = 0;
+  out[5] = 1;
+  for (let i = 6; i < 12; i++) out[i] = 0;
+  return out;
+}
+
+function fromB64url(s) {
+  const b = s.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b + '='.repeat((4 - (b.length % 4)) % 4));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// 表不存在就建，省得手动跑 SQL；建失败不标记，下次请求再试
+const SCHEMA = [
+  'CREATE TABLE IF NOT EXISTS hits (domain TEXT, ts INTEGER)',
+  'CREATE TABLE IF NOT EXISTS allowlist (domain TEXT PRIMARY KEY, ts INTEGER)',
+  'CREATE TABLE IF NOT EXISTS rules (domain TEXT PRIMARY KEY, ts INTEGER)',
+  'CREATE TABLE IF NOT EXISTS removed (domain TEXT PRIMARY KEY, ts INTEGER)'
+];
+let schemaReady = false;
+
+async function ensureTables(db) {
+  if (schemaReady) return;
+  try {
+    for (const s of SCHEMA) await db.prepare(s).run();
+    schemaReady = true;
+  } catch (e) {}
+}
+
+// 拦截记录 / 白名单接口
+async function blockedApi(url, env) {
+  const db = env.cfdoh;
+  const action = url.searchParams.get('action') || 'list';
+  const json = (o, s = 200) =>
+    new Response(JSON.stringify(o), {
+      status: s,
+      headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store' }
+    });
+
+  await ensureTables(db);
+
+  if (action === 'allow' || action === 'unallow') {
+    const d = normalizeDomain(url.searchParams.get('d'));
+    if (!d) return json({ error: '域名不合法' }, 400);
+    if (action === 'allow') {
+      await db.prepare('INSERT OR REPLACE INTO allowlist (domain, ts) VALUES (?, ?)').bind(d, Date.now()).run();
+    } else {
+      await db.prepare('DELETE FROM allowlist WHERE domain = ?').bind(d).run();
+    }
+    setMemo.allowlist.at = 0;
+    return json({ ok: true, domain: d });
+  }
+
+  // 查这个域名当前在不在拦截名单里，面板据此把按钮切成「拦截 / 删除」
+  if (action === 'check') {
+    const d = normalizeDomain(url.searchParams.get('d'));
+    if (!d) return json({ error: '域名不合法' }, 400);
+    const base = await getBaseSet(env);
+    const rules = await getDomainSet(env, 'rules');
+    const allow = await getDomainSet(env, 'allowlist');
+    const removed = await getDomainSet(env, 'removed');
+    return json({ domain: d, blocked: isBlocked(d, base, rules, allow, removed) });
+  }
+
+  // 往名单里加 / 从名单里删，默认名单里的条目也能删
+  if (action === 'block' || action === 'unblock') {
+    const d = normalizeDomain(url.searchParams.get('d'));
+    if (!d) return json({ error: '域名不合法' }, 400);
+    if (action === 'block') {
+      const base = await getBaseSet(env);
+      await db.prepare('DELETE FROM removed WHERE domain = ?').bind(d).run();
+      if (!base.has(d)) {
+        await db.prepare('INSERT OR REPLACE INTO rules (domain, ts) VALUES (?, ?)').bind(d, Date.now()).run();
+      }
+    } else {
+      await db.prepare('DELETE FROM rules WHERE domain = ?').bind(d).run();
+      const base = await getBaseSet(env);
+      if (base.has(d)) {
+        await db.prepare('INSERT OR REPLACE INTO removed (domain, ts) VALUES (?, ?)').bind(d, Date.now()).run();
+      }
+    }
+    setMemo.rules.at = 0;
+    setMemo.removed.at = 0;
+    return json({ ok: true, domain: d });
+  }
+
+  // 清缓存重新拉 GitHub 上的名单
+  if (action === 'refresh') {
+    await refreshBaseSet();
+    const base = await getBaseSet(env);
+    return json({ ok: true, count: base.size });
+  }
+
+  // 顺手清掉 7 天前的记录
+  await db.prepare('DELETE FROM hits WHERE ts < ?').bind(Date.now() - 7 * 86400000).run();
+
+  const cst = Date.now() + 8 * 3600000;
+  const dayStart = cst - (cst % 86400000) - 8 * 3600000;
+
+  const total = await db.prepare('SELECT COUNT(*) AS n FROM hits').first();
+  const today = await db.prepare('SELECT COUNT(*) AS n FROM hits WHERE ts >= ?').bind(dayStart).first();
+  const hits = await db.prepare('SELECT domain, ts FROM hits ORDER BY ts DESC LIMIT 100').all();
+  const top = await db.prepare('SELECT domain, COUNT(*) AS n FROM hits GROUP BY domain ORDER BY n DESC LIMIT 10').all();
+  const allow = await db.prepare('SELECT domain FROM allowlist ORDER BY ts DESC').all();
+  let rules = { results: [] };
+  try {
+    rules = await db.prepare('SELECT domain FROM rules ORDER BY ts DESC').all();
+  } catch (e) {}
+  let removed = { results: [] };
+  try {
+    removed = await db.prepare('SELECT domain FROM removed ORDER BY ts DESC').all();
+  } catch (e) {}
+
+  const base = await getBaseSet(env);
+  let count = base.size;
+  for (const x of removed.results || []) if (base.has(x.domain)) count--;
+  for (const x of rules.results || []) if (!base.has(x.domain)) count++;
+
+  return json({
+    total: (total && total.n) || 0,
+    today: (today && today.n) || 0,
+    count: count,
+    hits: hits.results || [],
+    top: top.results || [],
+    allow: (allow.results || []).map((r) => r.domain),
+    rules: (rules.results || []).map((r) => r.domain)
+  });
+}
+
 // DoH 请求处理函数
-async function DOHRequest(request) {
+async function DOHRequest(request, env, ctx) {
   const { method, headers, body } = request;
   const UA = headers.get('User-Agent') || 'DoH Client';
   const url = new URL(request.url);
   const { searchParams } = url;
+
+  // POST 报文只读一次：拦截判断和转发共用同一份 buffer
+  let postRaw = null;
+  if (method === 'POST') {
+    try {
+      postRaw = new Uint8Array(await request.arrayBuffer());
+    } catch (e) {
+      postRaw = null;
+    }
+  }
 
   try {
     // 直接访问端点的处理
@@ -475,6 +620,56 @@ async function DOHRequest(request) {
           'Access-Control-Allow-Origin': '*'
         }
       });
+    }
+
+    // 拦截判断：命中名单就地返回，不发给上游
+    const baseSet = await getBaseSet(env);
+    const ruleSet = await getDomainSet(env, 'rules');
+    const removeSet = await getDomainSet(env, 'removed');
+    if (baseSet.size || ruleSet.size) {
+      const allowSet = await getDomainSet(env, 'allowlist');
+      let rawQ = null;
+      let q = null;
+
+      if (method === 'POST') {
+        rawQ = postRaw;
+        q = rawQ ? readQuestion(rawQ) : null;
+      } else if (method === 'GET' && searchParams.has('dns')) {
+        try {
+          rawQ = fromB64url(searchParams.get('dns'));
+          q = readQuestion(rawQ);
+        } catch (e) {
+          q = null;
+        }
+      }
+
+      if (q && isBlocked(q.name, baseSet, ruleSet, allowSet, removeSet)) {
+        logHit(env, ctx, q.name);
+        return new Response(nxd(rawQ, q.end), {
+          headers: {
+            'Content-Type': 'application/dns-message',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+
+      // JSON 接口按 name 参数拦
+      if (method === 'GET' && searchParams.has('name')) {
+        const n = normalizeDomain(searchParams.get('name'));
+        if (n && isBlocked(n, baseSet, ruleSet, allowSet, removeSet)) {
+          logHit(env, ctx, n);
+          return new Response(JSON.stringify({
+            Status: 3,
+            Question: [{ name: n + '.', type: 1 }],
+            Comment: 'blocked'
+          }, null, 2), {
+            headers: {
+              'Content-Type': 'application/dns-json',
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
+      }
     }
 
     // 根据请求方法和参数构建转发请求
@@ -513,7 +708,7 @@ async function DOHRequest(request) {
           'Content-Type': 'application/dns-message',
           'User-Agent': UA
         },
-        body: body
+        body: postRaw || body
       });
 
     } else {
@@ -1273,6 +1468,154 @@ async function HTML() {
         width: 35%;
       }
     }
+
+    /* 拦截记录 / 白名单 */
+    .block-stats {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 16px 20px 4px;
+    }
+
+    .block-stat {
+      flex: 1 1 110px;
+      background: rgba(255, 242, 235, 0.8);
+      border: 1px solid rgba(253, 101, 60, 0.18);
+      border-radius: 10px;
+      padding: 10px 14px;
+    }
+
+    .block-stat b {
+      display: block;
+      font-size: 1.25rem;
+      line-height: 1.3;
+      color: rgb(253, 101, 60);
+    }
+
+    .block-stat span {
+      font-size: 0.78rem;
+      color: rgb(120, 95, 82);
+    }
+
+    .block-sub {
+      margin: 18px 20px 8px;
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: rgb(70, 50, 40);
+    }
+
+    .block-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    .block-refresh {
+      font-weight: 400;
+      font-size: 0.78rem;
+      color: rgb(253, 101, 60);
+      cursor: pointer;
+    }
+
+    .block-list {
+      margin: 0 20px 16px;
+      max-height: 320px;
+      overflow: auto;
+      border-radius: 10px;
+      border: 1px solid rgba(253, 101, 60, 0.15);
+      background: rgba(255, 255, 255, 0.75);
+    }
+
+    .block-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 12px;
+      font-size: 0.86rem;
+      color: rgb(70, 50, 40);
+      border-bottom: 1px solid rgba(253, 101, 60, 0.1);
+    }
+
+    .block-row:last-child {
+      border-bottom: none;
+    }
+
+    .block-row .dom {
+      word-break: break-all;
+    }
+
+    .block-row .time {
+      white-space: nowrap;
+      font-size: 0.78rem;
+      color: rgb(150, 125, 112);
+    }
+
+    .block-form {
+      display: flex;
+      gap: 8px;
+      margin: 0 20px 12px;
+    }
+
+    .block-form input {
+      flex: 1;
+      min-width: 0;
+      padding: 9px 12px;
+      font-size: 0.9rem;
+      border-radius: 8px;
+      border: 1px solid rgba(253, 101, 60, 0.3);
+      background: rgba(255, 255, 255, 0.9);
+      outline: none;
+    }
+
+    .block-form input:focus {
+      border-color: rgb(253, 101, 60);
+    }
+
+    .block-form button {
+      border: none;
+      border-radius: 8px;
+      padding: 9px 18px;
+      font-size: 0.9rem;
+      color: #fff;
+      background: rgb(253, 101, 60);
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+
+    .block-form button:hover {
+      background: rgb(230, 90, 50);
+    }
+
+    .block-tags {
+      margin: 0 20px 20px;
+    }
+
+    .block-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0 6px 6px 0;
+      padding: 4px 10px;
+      font-size: 0.82rem;
+      border-radius: 999px;
+      color: rgb(70, 50, 40);
+      background: rgba(255, 242, 235, 0.9);
+      border: 1px solid rgba(253, 101, 60, 0.2);
+    }
+
+    .block-tag i {
+      font-style: normal;
+      font-weight: 700;
+      color: rgb(253, 101, 60);
+      cursor: pointer;
+    }
+
+    .block-empty {
+      display: block;
+      padding: 14px 12px;
+      font-size: 0.85rem;
+      color: rgb(150, 125, 112);
+    }
   </style>
 </head>
 
@@ -1431,6 +1774,37 @@ async function HTML() {
       <div class="collapse-content" id="speedSection">
         <div class="collapse-inner">
           <iframe data-src="https://www.speedtest.cn/" style="width: 100%; height: 600px; border: none; border-radius: 6px; display: block;"></iframe>
+        </div>
+      </div>
+    </div>
+
+    <!-- 广告拦截折叠区 -->
+    <div class="collapse-card">
+      <button type="button" class="collapse-toggle" data-target="blockSection" aria-expanded="false">
+        <span class="collapse-title">拦截</span>
+        <svg class="collapse-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div class="collapse-content" id="blockSection">
+        <div class="collapse-inner">
+          <div class="block-stats" id="blockStats"></div>
+          <div class="block-sub block-title"><span id="ruleSub">拦截名单</span><span class="block-refresh" id="refreshBtn">刷新名单</span></div>
+          <div class="block-form">
+            <input id="ruleInput" type="text" placeholder="ads.example.com" autocomplete="off" />
+            <button id="ruleBtn" type="button">拦截</button>
+          </div>
+          <div class="block-tags" id="ruleTags"></div>
+          <div class="block-sub">白名单（命中即放行）</div>
+          <div class="block-form">
+            <input id="allowInput" type="text" placeholder="example.com" autocomplete="off" />
+            <button id="allowBtn" type="button">放行</button>
+          </div>
+          <div class="block-tags" id="allowTags"></div>
+          <div class="block-sub">最近拦截</div>
+          <div class="block-list" id="blockHits">
+            <div class="block-empty">展开后加载...</div>
+          </div>
         </div>
       </div>
     </div>
@@ -2170,6 +2544,150 @@ async function HTML() {
             }
           });
         });
+
+        // 广告拦截面板：首次展开才拉数据
+        (function () {
+          const btn = document.querySelector('[data-target="blockSection"]');
+          if (!btn) return;
+          let loaded = false;
+
+          const statsEl = document.getElementById('blockStats');
+          const hitsEl = document.getElementById('blockHits');
+          const tagsEl = document.getElementById('allowTags');
+          const inputEl = document.getElementById('allowInput');
+          const allowBtn = document.getElementById('allowBtn');
+          const ruleTagsEl = document.getElementById('ruleTags');
+          const ruleInputEl = document.getElementById('ruleInput');
+          const ruleBtn = document.getElementById('ruleBtn');
+          const ruleSubEl = document.getElementById('ruleSub');
+          const refreshBtn = document.getElementById('refreshBtn');
+          let ruleMode = 'block';
+
+          function esc(s) {
+            return String(s).replace(/[&<>"]/g, function (c) {
+              return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+            });
+          }
+
+          function ago(ts) {
+            const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+            if (s < 60) return s + ' 秒前';
+            if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
+            if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
+            return Math.floor(s / 86400) + ' 天前';
+          }
+
+          function render(d) {
+            statsEl.innerHTML =
+              '<div class="block-stat"><b>' + d.today + '</b><span>今日拦截</span></div>' +
+              '<div class="block-stat"><b>' + d.total + '</b><span>近 7 天累计</span></div>' +
+              '<div class="block-stat"><b>' + d.allow.length + '</b><span>白名单</span></div>';
+
+            hitsEl.innerHTML = d.hits.length
+              ? d.hits.map(function (h) {
+                  return '<div class="block-row"><span class="dom">' + esc(h.domain) +
+                    '</span><span class="time">' + ago(h.ts) + '</span></div>';
+                }).join('')
+              : '<div class="block-empty">还没有拦截记录</div>';
+
+            // 白名单 / 额外拦截域名用同一套渲染，点 × 即删
+            function tags(box, list, empty, action) {
+              box.innerHTML = list.length
+                ? list.map(function (x) {
+                    return '<span class="block-tag">' + esc(x) + '<i data-x="' + esc(x) + '">×</i></span>';
+                  }).join('')
+                : '<span class="block-empty">' + empty + '</span>';
+              box.querySelectorAll('i[data-x]').forEach(function (i) {
+                i.addEventListener('click', function () { act(action, i.getAttribute('data-x')); });
+              });
+            }
+
+            ruleSubEl.textContent = '拦截名单（' + (d.count || 0).toLocaleString() + ' 条）';
+            tags(tagsEl, d.allow, '白名单为空', 'unallow');
+            tags(ruleTagsEl, d.rules || [], '默认名单之外没有额外添加的域名', 'unblock');
+          }
+
+          async function load() {
+            try {
+              const r = await fetch('/blocked/api?action=list');
+              const d = await r.json();
+              if (d.error) throw new Error(d.error);
+              render(d);
+            } catch (e) {
+              hitsEl.innerHTML = '<div class="block-empty">' + esc(e.message) + '</div>';
+            }
+          }
+
+          async function act(action, domain) {
+            try {
+              const r = await fetch('/blocked/api?action=' + action + '&d=' + encodeURIComponent(domain));
+              const d = await r.json();
+              if (d.error) throw new Error(d.error);
+              inputEl.value = '';
+              ruleInputEl.value = '';
+              ruleMode = 'block';
+              ruleBtn.textContent = '拦截';
+              await load();
+            } catch (e) {
+              alert('操作失败：' + e.message);
+            }
+          }
+
+          btn.addEventListener('click', function () {
+            if (loaded) return;
+            loaded = true;
+            load();
+          });
+
+          allowBtn.addEventListener('click', function () {
+            const v = inputEl.value.trim();
+            if (v) act('allow', v);
+          });
+
+          inputEl.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') allowBtn.click();
+          });
+
+          // 输入框里的域名当前在不在名单里，决定按钮是「拦截」还是「删除」
+          let checkTimer = null;
+
+          function refreshRuleBtn() {
+            const v = ruleInputEl.value.trim();
+            clearTimeout(checkTimer);
+            if (!v) {
+              ruleMode = 'block';
+              ruleBtn.textContent = '拦截';
+              return;
+            }
+            checkTimer = setTimeout(async function () {
+              try {
+                const r = await fetch('/blocked/api?action=check&d=' + encodeURIComponent(v));
+                const d = await r.json();
+                if (!d || d.error || ruleInputEl.value.trim() !== v) return;
+                ruleMode = d.blocked ? 'unblock' : 'block';
+                ruleBtn.textContent = d.blocked ? '删除' : '拦截';
+              } catch (e) {}
+            }, 250);
+          }
+
+          ruleInputEl.addEventListener('input', refreshRuleBtn);
+
+          ruleInputEl.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') ruleBtn.click();
+          });
+
+          ruleBtn.addEventListener('click', function () {
+            const v = ruleInputEl.value.trim();
+            if (v) act(ruleMode, v);
+          });
+
+          refreshBtn.addEventListener('click', function () {
+            refreshBtn.textContent = '刷新中…';
+            act('refresh', '').then(function () {
+              refreshBtn.textContent = '刷新名单';
+            });
+          });
+        })();
   </script>
 </body>
 
@@ -2178,59 +2696,4 @@ async function HTML() {
   return new Response(html, {
     headers: { "content-type": "text/html;charset=UTF-8" }
   });
-}
-
-async function 代理URL(代理网址, 目标网址) {
-  const 网址列表 = await 整理(代理网址);
-  const 完整网址 = 网址列表[Math.floor(Math.random() * 网址列表.length)];
-
-  // 解析目标 URL
-  const 解析后的网址 = new URL(完整网址);
-  console.log(解析后的网址);
-  // 提取并可能修改 URL 组件
-  const 协议 = 解析后的网址.protocol.slice(0, -1) || 'https';
-  const 主机名 = 解析后的网址.hostname;
-  let 路径名 = 解析后的网址.pathname;
-  const 查询参数 = 解析后的网址.search;
-
-  // 处理路径名
-  if (路径名.charAt(路径名.length - 1) == '/') {
-    路径名 = 路径名.slice(0, -1);
-  }
-  路径名 += 目标网址.pathname;
-
-  // 构建新的 URL
-  const 新网址 = `${协议}://${主机名}${路径名}${查询参数}`;
-
-  // 反向代理请求
-  const 响应 = await fetch(新网址);
-
-  // 创建新的响应
-  let 新响应 = new Response(响应.body, {
-    status: 响应.status,
-    statusText: 响应.statusText,
-    headers: 响应.headers
-  });
-
-  // 添加自定义头部，包含 URL 信息
-  //新响应.headers.set('X-Proxied-By', 'Cloudflare Worker');
-  //新响应.headers.set('X-Original-URL', 完整网址);
-  新响应.headers.set('X-New-URL', 新网址);
-
-  return 新响应;
-}
-
-async function 整理(内容) {
-  // 将制表符、双引号、单引号和换行符都替换为逗号
-  // 然后将连续的多个逗号替换为单个逗号
-  var 替换后的内容 = 内容.replace(/[	|"'\r\n]+/g, ',').replace(/,+/g, ',');
-
-  // 删除开头和结尾的逗号（如果有的话）
-  if (替换后的内容.charAt(0) == ',') 替换后的内容 = 替换后的内容.slice(1);
-  if (替换后的内容.charAt(替换后的内容.length - 1) == ',') 替换后的内容 = 替换后的内容.slice(0, 替换后的内容.length - 1);
-
-  // 使用逗号分割字符串，得到地址数组
-  const 地址数组 = 替换后的内容.split(',');
-
-  return 地址数组;
 }
