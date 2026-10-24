@@ -2,6 +2,10 @@ let DoH = "cloudflare-dns.com";
 let dnsDoH = `https://${DoH}/dns-query`;
 let jsonDoH = `https://${DoH}/resolve`;
 let DoHPath = 'dns-query';
+
+// 站点图标的原始 SVG：与主页内联的那份完全一致（属性、颜色、尺寸都没动），
+// 只是多暴露一个公开地址，让浏览器与图标抓取工具在未登录时也能取到。
+const ICON_SVG = `<svg t='1776862807100' class='icon' viewBox='0 0 1024 1024' version='1.1' xmlns='http://www.w3.org/2000/svg' p-id='1867' width='200' height='200'><path d='M512 83.2h19.2V64H512C265.6 64 64 265.6 64 512h19.2c0-236.8 192-428.8 428.8-428.8zM944 512c0 230.4-182.4 422.4-412.8 428.8v19.2C768 950.4 960 755.2 960 512h-16z m-38.4 0c0-208-169.6-377.6-377.6-377.6S153.6 304 153.6 512c0 208 169.6 377.6 377.6 377.6 208 0 374.4-169.6 374.4-377.6zM188.8 512c0-188.8 153.6-339.2 339.2-339.2S870.4 323.2 870.4 512c0 188.8-153.6 339.2-339.2 339.2-188.8 3.2-342.4-150.4-342.4-339.2z m342.4 64c19.2 19.2 44.8 28.8 70.4 28.8h19.2c60.8 0 108.8-48 108.8-108.8v-70.4c0-28.8-12.8-54.4-32-76.8s-48-32-76.8-32h-19.2c-25.6 0-51.2 9.6-70.4 28.8v-32h-35.2v393.6h35.2V576z m0-153.6c0-38.4 32-70.4 70.4-70.4h19.2c38.4 0 70.4 32 70.4 70.4v70.4c0 38.4-32 70.4-70.4 70.4h-19.2c-38.4 0-70.4-32-70.4-70.4v-70.4z m-144 288h35.2V313.6h-35.2v396.8z' fill='' p-id='1868'></path></svg>`;
 export default {
   async fetch(request, env, ctx) {
     // 上游可用环境变量 DOH 覆盖，两个地址跟着一起变
@@ -25,6 +29,16 @@ export default {
           'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
           'Access-Control-Allow-Headers': '*',
           'Access-Control-Max-Age': '86400'
+        }
+      });
+    }
+
+    // 公开图标地址：不改页面、不改图标，只是让未登录时也能取到这张图
+    if (path === '/favicon.svg') {
+      return new Response(ICON_SVG, {
+        headers: {
+          'content-type': 'image/svg+xml; charset=UTF-8',
+          'cache-control': 'public, max-age=604800'
         }
       });
     }
